@@ -258,18 +258,27 @@ interface MediaInfo {
 }
 
 interface Server {
-	AccessToken: string;
-	DateLastAccessed: number; // timestamp
-	Id: string;
-	IsLocalServer: boolean;
-	LastConnectionMode: number;
-	LocalAddress: string;
 	ManualAddress: string;
-	Name: string;
-	RemoteAddress: string;
-	Type: "Server";
+	ManualAddressOnly: Boolean;
+	IsLocalServer: true;
 	UserId: string;
-	manualAddressOnly: boolean;
+	DateLastAccessed: number;
+	LastConnectionMode: number;
+	Type: string;
+	Name: string;
+	Id: string;
+	Users: [
+		{
+			UserId: string;
+			AccessToken: string;
+		},
+		{
+			UserId: string;
+			AccessToken: string;
+		}
+	];
+	LocalAddress: string;
+	RemoteAddress: string;
 }
 
 const // official website
@@ -341,7 +350,9 @@ function handleOfficialWebsite(): void {
  * @return {ApiClient} ApiClient object
  */
 async function getApiClient() {
-	return presence.getPageletiable<ApiClient>("ApiClient");
+	const actualData = await presence.getPageVariable("ApiClient");
+	console.log(actualData["ApiClient"]);
+	return actualData["ApiClient"] as ApiClient;
 }
 
 /**
@@ -461,23 +472,24 @@ const mediaInfoCache = new Map<string, MediaInfo>();
 async function obtainMediaInfo(itemId: string): Promise<MediaInfo> {
 	if (mediaInfoCache.has(itemId)) return mediaInfoCache.get(itemId);
 
-	let { AccessToken: accessToken } = ApiClient._serverInfo;
+	let accessToken = ApiClient._serverInfo?.Users?.[1]?.AccessToken;
 
 	if (!accessToken) {
 		// refresh the ApiClient
 		ApiClient = await getApiClient();
 
-		({ AccessToken: accessToken } = ApiClient._serverInfo);
+		accessToken = ApiClient._serverInfo?.Users?.[1]?.AccessToken;
 	}
+	const url =
+		`${embyBasenameURL()}emby/Users/${getUserId()}/Items/${itemId}?` +
+		`X-Emby-Client=${ApiClient._appName.replace(/ /gm, "_")}&` +
+		`X-Emby-Device-Name=${ApiClient._deviceName}&` +
+		`X-Emby-Device-Id=${ApiClient._deviceId}&` +
+		`X-Emby-Client-Version=${ApiClient._appVersion}&` +
+		`X-Emby-Token=${accessToken}`;
 
-	const res = await fetch(
-			`${embyBasenameURL()}emby/Users/${getUserId()}/Items/${itemId}?` +
-				`X-Emby-Client=${ApiClient._appName}&` +
-				`X-Emby-Device-Name=${ApiClient._deviceName}&` +
-				`X-Emby-Device-Id=${ApiClient._deviceId}&` +
-				`X-Emby-Client-Version=${ApiClient._appVersion}&` +
-				`X-Emby-Token=${accessToken}`
-		),
+	console.log(url.replace(/ /gm, "_"));
+	const res = await fetch(url.replace(/ /gm, "_")),
 		mediaInfo: MediaInfo = await res.json();
 
 	mediaInfoCache.set(itemId, mediaInfo);
@@ -489,12 +501,18 @@ async function obtainMediaInfo(itemId: string): Promise<MediaInfo> {
  * handleVideoPlayback - handles the presence when the user is using the video player
  */
 async function handleVideoPlayback(): Promise<void> {
-	const videoPlayerPage = document.querySelector("[data-type='video-osd']");
+	// const version = document
+	// 	.querySelector("html")
+	// 	?.getAttribute("data-appversion");
+	const videoPlayerPage =
+		document.querySelector("[data-type='video-osd']") ||
+		document.querySelector(".htmlVideoPlayerContainer");
 
 	if (videoPlayerPage === null) {
 		// elements not loaded yet
 		return;
 	}
+	getApiClient();
 
 	const videoPlayerElem = document.querySelector<HTMLVideoElement>("video");
 
@@ -504,7 +522,10 @@ async function handleVideoPlayback(): Promise<void> {
 		largeImage = PRESENCE_ART_ASSETS.logo;
 
 	const regexResult = /\/Items\/(\d+)\//.exec(
-		document.querySelector<HTMLDivElement>(".pageTitle").style.backgroundImage
+		document.querySelector<HTMLDivElement>(".pageTitle")?.style
+			.backgroundImage ||
+			document.querySelector<HTMLDivElement>(".itemBackdrop").style
+				.backgroundImage
 	);
 
 	if (!regexResult) {
@@ -515,11 +536,10 @@ async function handleVideoPlayback(): Promise<void> {
 	const mediaInfo = await obtainMediaInfo(regexResult[1]);
 
 	// display generic info
-	if (!mediaInfo) {
+	if (!mediaInfo || typeof mediaInfo === "string") {
 		title = "Watching unknown content";
 		subtitle = "No metadata could be obtained";
-	} else if (typeof mediaInfo === "string") return;
-	else {
+	} else {
 		switch (mediaInfo.Type) {
 			case "Movie":
 				title = "Watching a Movie";
@@ -570,10 +590,8 @@ async function handleVideoPlayback(): Promise<void> {
 			delete presenceData.endTimestamp;
 		}
 	}
-
 	presenceData.details = title;
 	presenceData.state = subtitle;
-
 	if (!presenceData.state) delete presenceData.state;
 }
 
@@ -731,10 +749,10 @@ async function handleWebClient(): Promise<void> {
 			await handleItemDetails();
 			break;
 
-		case "videoosd/videoosd.html":
+		case "videoosd/videoosd.html": {
 			await handleVideoPlayback();
 			break;
-
+		}
 		default:
 			if (path.substr(0, 3) !== "dlg") presence.info(`path: ${path}`);
 	}
