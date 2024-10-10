@@ -2,7 +2,8 @@
  * The interfaces may have some things missing,
  * I've tried to set as many properties as I could find.
  */
-
+let version: string,
+	showMediaTimestamp = false;
 interface ApiClient {
 	enableAutomaticBitrateDetection: boolean;
 	enableAutomaticNetworking: boolean;
@@ -86,7 +87,7 @@ interface ApiClient {
 		IsLocal: boolean;
 	};
 	_serverAddress: string;
-	_serverInfo: Server;
+	_serverInfo: Server | ServerLatest;
 	_serverVersion: string;
 	_webSocket: {
 		binaryType: string;
@@ -257,7 +258,7 @@ interface MediaInfo {
 	Height: number;
 }
 
-interface Server {
+interface ServerLatest {
 	ManualAddress: string;
 	ManualAddressOnly: Boolean;
 	IsLocalServer: true;
@@ -279,6 +280,21 @@ interface Server {
 	];
 	LocalAddress: string;
 	RemoteAddress: string;
+}
+
+interface Server {
+	AccessToken: string;
+	DateLastAccessed: number; // timestamp
+	Id: string;
+	IsLocalServer: boolean;
+	LastConnectionMode: number;
+	LocalAddress: string;
+	ManualAddress: string;
+	Name: string;
+	RemoteAddress: string;
+	Type: "Server";
+	UserId: string;
+	manualAddressOnly: boolean;
 }
 
 const // official website
@@ -393,6 +409,7 @@ function mediaPrimaryImage(mediaId: string): string {
 async function handleAudioPlayback(): Promise<void> {
 	// sometimes the buttons are not created fast enough
 	try {
+		presenceData.type = ActivityType.Listening;
 		const audioElement = document.querySelector<HTMLAudioElement>("audio"),
 			regexResult = /\/Audio\/(\w+)\/universal/.exec(audioElement.src);
 
@@ -418,7 +435,7 @@ async function handleAudioPlayback(): Promise<void> {
 			presenceData.smallImageKey = PRESENCE_ART_ASSETS.play;
 			presenceData.smallImageText = "Playing";
 
-			if (await presence.getSetting<boolean>("showMediaTimestamps")) {
+			if (showMediaTimestamp) {
 				[presenceData.startTimestamp, presenceData.endTimestamp] =
 					presence.getTimestampsfromMedia(audioElement);
 			} else delete presenceData.endTimestamp;
@@ -471,17 +488,31 @@ const mediaInfoCache = new Map<string, MediaInfo>();
  */
 async function obtainMediaInfo(itemId: string): Promise<MediaInfo> {
 	if (mediaInfoCache.has(itemId)) return mediaInfoCache.get(itemId);
-
-	let accessToken = ApiClient._serverInfo?.Users?.[1]?.AccessToken;
+	let ae, accessToken: string;
+	if (!version.includes("4.7")) {
+		ae = ApiClient._serverInfo as ServerLatest;
+		accessToken = ae?.Users?.[1]?.AccessToken;
+	} else {
+		ae = ApiClient._serverInfo as Server;
+		accessToken = ae?.AccessToken;
+	}
 
 	if (!accessToken) {
 		// refresh the ApiClient
 		ApiClient = await getApiClient();
-
-		accessToken = ApiClient._serverInfo?.Users?.[1]?.AccessToken;
+		if (!version.includes("4.7")) {
+			ae = ApiClient._serverInfo as ServerLatest;
+			accessToken = ae?.Users?.[1]?.AccessToken;
+		} else {
+			ae = ApiClient._serverInfo as Server;
+			accessToken = ae?.AccessToken;
+		}
 	}
 	const url =
-		`${embyBasenameURL()}emby/Users/${getUserId()}/Items/${itemId}?` +
+		`${embyBasenameURL()}emby/Users/${getUserId()}/Items/${itemId.replace(
+			/\//gm,
+			""
+		)}?` +
 		`X-Emby-Client=${ApiClient._appName.replace(/ /gm, "_")}&` +
 		`X-Emby-Device-Name=${ApiClient._deviceName}&` +
 		`X-Emby-Device-Id=${ApiClient._deviceId}&` +
@@ -501,9 +532,6 @@ async function obtainMediaInfo(itemId: string): Promise<MediaInfo> {
  * handleVideoPlayback - handles the presence when the user is using the video player
  */
 async function handleVideoPlayback(): Promise<void> {
-	// const version = document
-	// 	.querySelector("html")
-	// 	?.getAttribute("data-appversion");
 	const videoPlayerPage =
 		document.querySelector("[data-type='video-osd']") ||
 		document.querySelector(".htmlVideoPlayerContainer");
@@ -521,19 +549,25 @@ async function handleVideoPlayback(): Promise<void> {
 		subtitle,
 		largeImage = PRESENCE_ART_ASSETS.logo;
 
-	const regexResult = /\/Items\/(\d+)\//.exec(
-		document.querySelector<HTMLDivElement>(".pageTitle")?.style
-			.backgroundImage ||
-			document.querySelector<HTMLDivElement>(".itemBackdrop").style
+	const regexResult =
+		/\/Items\/(\d+)\//.exec(
+			document.querySelector<HTMLDivElement>(".pageTitle")?.style
 				.backgroundImage
-	);
+		) ||
+		/\/Items\/(\d+)\//.exec(
+			document.querySelector<HTMLDivElement>(".itemBackdrop")?.style
+				?.backgroundImage
+		) ||
+		/\/[0-9]+\//.exec(
+			document.querySelector<HTMLVideoElement>(".htmlVideoPlayerContainer")?.src
+		);
 
 	if (!regexResult) {
 		presence.error("Could not obtain video itemId");
 		return;
 	}
 
-	const mediaInfo = await obtainMediaInfo(regexResult[1]);
+	const mediaInfo = await obtainMediaInfo(regexResult[1] || regexResult[0]);
 
 	// display generic info
 	if (!mediaInfo || typeof mediaInfo === "string") {
@@ -569,21 +603,24 @@ async function handleVideoPlayback(): Promise<void> {
 
 		// watching live tv
 		if (mediaInfo && mediaInfo.Type === "TvChannel") {
+			presenceData.type = ActivityType.Watching;
 			presenceData.smallImageKey = PRESENCE_ART_ASSETS.live;
 			presenceData.smallImageText = "Live TV";
 
 			// playing
 		} else if (!videoPlayerElem.paused) {
+			presenceData.type = ActivityType.Watching;
 			presenceData.smallImageKey = PRESENCE_ART_ASSETS.play;
 			presenceData.smallImageText = "Playing";
 
-			if (await presence.getSetting<boolean>("showMediaTimestamps")) {
+			if (showMediaTimestamp) {
 				[presenceData.startTimestamp, presenceData.endTimestamp] =
 					presence.getTimestampsfromMedia(videoPlayerElem);
 			} else delete presenceData.endTimestamp;
 
 			// paused
 		} else {
+			presenceData.type = ActivityType.Watching;
 			presenceData.smallImageKey = PRESENCE_ART_ASSETS.pause;
 			presenceData.smallImageText = "Paused";
 
@@ -781,9 +818,17 @@ async function setDefaultsToPresence(): Promise<void> {
  * updateData - tick function, this is called several times a second by UpdateData event
  */
 async function updateData(): Promise<void> {
+	showMediaTimestamp = await presence.getSetting<boolean>(
+		"showMediaTimestamps"
+	);
 	await setDefaultsToPresence();
 
 	let showPresence = false;
+
+	const tempversion =
+		ApiClient?._appVersion ?? (await getApiClient())?._appVersion;
+
+	if (!version || version !== tempversion) version = tempversion;
 
 	// we are on the official emby page
 	if (location.host.toLowerCase() === EMBY_URL) {
@@ -805,6 +850,9 @@ async function updateData(): Promise<void> {
 
 	// if emby is detected init/update the presence status
 	if (showPresence) {
+		if (!presenceData.largeImageKey)
+			presenceData.largeImageKey = PRESENCE_ART_ASSETS.logo;
+
 		if (!presenceData.details) presence.setActivity();
 		else presence.setActivity(presenceData);
 	}
@@ -848,10 +896,8 @@ async function init(): Promise<void> {
 		presence = new Presence({
 			clientId: "671807692297207828",
 		});
-
-		if (isWebClient) presence.info("Emby web client detected");
-
 		presence.on("UpdateData", updateData);
+		if (isWebClient) presence.info("Emby web client detected");
 	}
 }
 init();
